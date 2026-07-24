@@ -5,7 +5,25 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { computeOrders } from './writers.js';
-import { happyReturnOrder, makeSeededSources, stuckStagingDtcOrder } from './seededBoard.js';
+import { agoIso, greenDtcOrder, happyReturnOrder, makeSeededSources, stuckStagingDtcOrder } from './seededBoard.js';
+import type { OosHeldOrder } from '@order-health/shared';
+
+// A middleware OOS-held backlog row. `held` builds one with sensible defaults so a
+// test only spells out the fields it cares about (order_name, status, class).
+function heldRow(over: Partial<OosHeldOrder> & Pick<OosHeldOrder, 'order_id' | 'order_name'>): OosHeldOrder {
+  return {
+    held_class: 'transient',
+    status: 'needs_operator',
+    attempts: 9,
+    first_seen_at: '2026-07-19T11:35:13.000Z',
+    last_attempt_at: '2026-07-20T11:35:13.000Z',
+    last_detail: 're-check window expired without recovery',
+    age_s: null,
+    nav_bucket: null,
+    remediation_tool_id: null,
+    ...over,
+  };
+}
 
 test('Unit 2: a Happy Return is reclassified out of awaiting_ship (green, classification return)', async () => {
   const now = Date.now();
@@ -95,4 +113,55 @@ test('Unit 1: an in-stock awaiting_ship order with FS available >= 0 classifies 
   const orders = await computeOrders(sources);
   const o = orders.find((x) => x.nav_order_no === '1003');
   assert.equal(o?.classification, 'genuine_3pl_delay');
+});
+
+// --- OOS-held full drops appear as individual rows in the main list ----------
+// A full-order drop (allocator tagged every line OutOfStock) never reaches NAV, so it
+// is on no NAV board and the aggregate OOS-held pipe was the ONLY place it showed. It
+// now rides as its own red line_dropped row so it is findable and counts as stuck.
+
+test('OOS-held: a full drop with no NAV order appears as an individual red line_dropped row', async () => {
+  const now = Date.now();
+  // computeOrders reads the wall clock internally, so the row is aged against real
+  // now; seed first_seen_at 5 days back so the computed age lands near 5 * 86400s.
+  const sources = makeSeededSources({
+    now,
+    orders: [greenDtcOrder('SP-100000-1', now)], // an unrelated healthy NAV order
+    oosHeld: [heldRow({ order_id: '7226144522489', order_name: 'SP-323019', first_seen_at: agoIso(5 * 86400, now) })],
+  });
+  const orders = await computeOrders(sources);
+  const dropped = orders.find((o) => o.shopify_order_name === 'SP-323019');
+  assert.ok(dropped, 'the dropped order should be its own row');
+  assert.equal(dropped.order_verdict, 'red');
+  assert.equal(dropped.nav_order_no, null); // never reached NAV
+  assert.equal(dropped.shopify_order_id, '7226144522489');
+  assert.equal(dropped.handoff?.state, 'line_dropped');
+  assert.equal(dropped.handoff?.owner, 'grundens_ops');
+  assert.ok(dropped.oldest_stuck_age_s !== null && Math.abs(dropped.oldest_stuck_age_s - 5 * 86400) < 120); // aged from first_seen_at
+  // The healthy NAV order is untouched and still present.
+  assert.ok(orders.find((o) => o.nav_order_no === 'SP-100000-1'));
+});
+
+test('OOS-held: a held row whose order IS in NAV (partial drop) is not double-added', async () => {
+  const now = Date.now();
+  const sources = makeSeededSources({
+    now,
+    // greenDtcOrder sets shopifyOrderName '#SP-322673'; the held row carries the same
+    // name, so the order is already on the board and must not be appended again.
+    orders: [{ ...greenDtcOrder('SP-322673-1', now), shopifyOrderName: 'SP-322673' }],
+    oosHeld: [heldRow({ order_id: '7223883268345', order_name: 'SP-322673' })],
+  });
+  const orders = await computeOrders(sources);
+  const rows = orders.filter((o) => o.shopify_order_name === 'SP-322673');
+  assert.equal(rows.length, 1, 'the order already in NAV is not duplicated by the held read');
+});
+
+test('OOS-held: a resolved held row is not surfaced as a row', async () => {
+  const now = Date.now();
+  const sources = makeSeededSources({
+    now,
+    oosHeld: [heldRow({ order_id: '999', order_name: 'SP-000001', status: 'resolved' })],
+  });
+  const orders = await computeOrders(sources);
+  assert.equal(orders.find((o) => o.shopify_order_name === 'SP-000001'), undefined);
 });

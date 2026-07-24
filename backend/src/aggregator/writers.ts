@@ -756,9 +756,13 @@ function isReturnRow(row: NavOrderLifecycleRow): boolean {
 }
 
 export async function computeOrders(sources: Sources): Promise<OrderHealth[]> {
-  const [rows] = await Promise.all([
+  const [rows, , heldOrders] = await Promise.all([
     sources.nav.getOrderLifecycleRows(),
     sources.middleware.getErrors(), // errors view feeds latched hop errors in the live join
+    // OOS-held drops: orders the allocator dropped as out-of-stock that never reached
+    // NAV. They live only in the middleware, so they are appended as individual rows
+    // below rather than derived from the NAV board.
+    sources.middleware.getOosHeldOrders(),
   ]);
   const now = Date.now();
 
@@ -810,7 +814,60 @@ export async function computeOrders(sources: Sources): Promise<OrderHealth[]> {
   // The stage dot is left untouched so the lifecycle view still shows WHERE the order
   // is; the verdict now says WHOSE it is.
   await applyHandoffVerdicts(sources, paired);
+
+  // OOS-held drops as individual rows. Each middleware oos_held_order still needing
+  // attention (needs_operator / pending) is an order the allocator dropped as
+  // out-of-stock; a full drop never reached NAV, so it is not in `graded` at all.
+  // We append it as its own red row so it is findable in the main list and counts as
+  // stuck, instead of hiding behind an always-red aggregate backlog card. Orders that
+  // ARE already present (still open in NAV) are skipped, they are graded from NAV.
+  const known = new Set<string>();
+  for (const g of graded) {
+    if (g.shopify_order_id !== null) known.add(g.shopify_order_id);
+    if (g.shopify_order_name !== null) known.add(g.shopify_order_name);
+  }
+  for (const o of heldOrders ?? []) {
+    if (o.status !== 'needs_operator' && o.status !== 'pending') continue;
+    const id = o.order_id;
+    const name = o.order_name;
+    if ((id !== null && known.has(id)) || (name !== null && known.has(name))) continue;
+    graded.push(oosHeldToOrderRow(o, now));
+  }
+
   return graded;
+}
+
+// Map a middleware OOS-held drop into a synthetic order-health row. These have no NAV
+// order (the allocator dropped them before staging), so the NAV-derived fields are
+// null and the verdict is a flat red ops defect owned by us. Read-only.
+function oosHeldToOrderRow(o: OosHeldOrder, nowMs: number): OrderHealth {
+  const ageS =
+    o.age_s ??
+    (o.first_seen_at !== null
+      ? Math.max(0, Math.floor((nowMs - Date.parse(o.first_seen_at)) / 1000))
+      : null);
+  const reason =
+    o.held_class === 'backorder'
+      ? `Order dropped as out of stock and awaiting supply (${o.status ?? 'held'}). Never reached NAV.`
+      : `Order dropped at allocation (out of stock, ${o.status ?? 'held'}); never reached NAV. Needs operator: re-drive or add the line once stock is available. ${o.last_detail ?? ''}`.trim();
+  return {
+    channel: 'dtc',
+    nav_order_no: null,
+    shopify_order_id: o.order_id,
+    shopify_order_name: o.order_name,
+    customer_ref: null,
+    current_stage: 'allocator_split', // allocated, then dropped before NAV staging
+    order_verdict: 'red',
+    oldest_stuck_age_s: ageS,
+    is_orphan_suspect: false,
+    note: reason,
+    handoff: {
+      state: 'line_dropped',
+      owner: 'grundens_ops',
+      reason,
+      label: ORDER_HANDOFF_LABEL.line_dropped,
+    },
+  };
 }
 
 // Overlay the handoff classification onto graded order rows. Orders with no NAV order
