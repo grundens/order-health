@@ -98,6 +98,19 @@ function DossierBody({ d }: { d: OrderDossier }): JSX.Element {
         {d.handoff && <span className={`tag owner ${d.handoff.owner}`}>{d.handoff.label}</span>}
         {d.handoff && <span className="dsx-owner">Owned by {ownerLabel(d.handoff.owner)}</span>}
         {d.handoff && <p className="dsx-reason">{d.handoff.reason}</p>}
+        {/* Key identifiers, so the operator can cross-reference or open the order in
+            Shopify Admin. The Shopify order id is the numeric web id from the NAV leg. */}
+        {d.identity && (
+          <dl className="dsx-ids">
+            <div><dt>NAV order</dt><dd>{d.identity.nav_order_no ?? d.order_no}</dd></div>
+            <div><dt>Shopify order id</dt><dd>{d.identity.shopify_order_id ?? '-'}</dd></div>
+            {d.identity.shopify_order_name && (
+              <div><dt>Shopify name</dt><dd>{d.identity.shopify_order_name}</dd></div>
+            )}
+            <div><dt>Channel</dt><dd>{d.identity.channel ?? '-'}</dd></div>
+            <div><dt>Ordered</dt><dd>{fmtNavDate(d.identity.order_at)}</dd></div>
+          </dl>
+        )}
       </div>
 
       {/* Legs: every NAV split of the order, open or posted. */}
