@@ -193,6 +193,11 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .dsx-status.s-in_progress { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
 .dsx-status.s-canceled { background: transparent; color: var(--faint); }
 .dsx-status.s-line_dropped { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
+/* Key identifiers row in the dossier header (NAV order, Shopify order id, etc.). */
+.dsx-ids { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 6px 0 0; }
+.dsx-ids > div { display: flex; gap: 7px; align-items: baseline; }
+.dsx-ids dt { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
+.dsx-ids dd { margin: 0; font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--ink); }
 .dsx-status.s-not_found { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
 /* --- Unit 3 monitors (price-sync, NAV job queue, Shopify webhooks) --------- */
 /* Two-card layout for the smaller monitors (they carry two verdict cards, not
