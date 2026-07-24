@@ -192,6 +192,7 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .dsx-status.s-partial { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
 .dsx-status.s-in_progress { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
 .dsx-status.s-canceled { background: transparent; color: var(--faint); }
+.dsx-status.s-line_dropped { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
 .dsx-status.s-not_found { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
 /* --- Unit 3 monitors (price-sync, NAV job queue, Shopify webhooks) --------- */
 /* Two-card layout for the smaller monitors (they carry two verdict cards, not

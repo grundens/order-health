@@ -109,7 +109,7 @@ export function assembleDossier(input: DossierInputs): OrderDossier {
   const skuHasStock = (sku: string | null): boolean =>
     sku !== null && (availableBySku.get(sku) ?? 0) > 0;
 
-  // Per-line rollup.
+  // Per-line rollup of the NAV lines.
   const lines: OrderDossierLine[] = composite.lines.map((l) => ({
     leg: l.orderNo,
     sku: l.sku,
@@ -123,12 +123,47 @@ export function assembleDossier(input: DossierInputs): OrderDossier {
     status: input.shopify?.cancelled === true ? 'canceled' : lineStatusOf(l, skuHasStock(l.sku)),
   }));
 
+  // DROPPED-LINE RECONCILIATION. A line the customer paid for on the Shopify order
+  // that appears on NO NAV leg (open or posted) never reached NAV. The middleware
+  // drops OutOfStock-reasoned allocations from the staging write by design, so an
+  // under-fulfilled customer is otherwise invisible: the NAV-only line table shows
+  // fewer lines and the order still reads "shipped". We surface each dropped line
+  // with a 'dropped' status and its own inventory, and it drives a red verdict below.
+  const navSkus = new Set(
+    composite.lines.map((l) => l.sku).filter((s): s is string => s !== null),
+  );
+  const droppedLines: OrderDossierLine[] = [];
+  if (input.shopify !== null && input.shopify.cancelled !== true) {
+    const seen = new Set<string>();
+    for (const li of input.shopify.line_items) {
+      const sku = li.sku;
+      if (sku.length === 0 || navSkus.has(sku) || seen.has(sku)) continue;
+      seen.add(sku);
+      droppedLines.push({
+        leg: null,
+        sku,
+        description: li.name,
+        location: null,
+        ordered: li.quantity,
+        shipped: 0,
+        invoiced: 0,
+        outstanding: li.quantity,
+        unit_price: li.unit_price,
+        status: 'dropped',
+      });
+    }
+  }
+  for (const d of droppedLines) lines.push(d);
+  const hasDroppedLine = droppedLines.length > 0;
+
   // Overall order status.
   const anyOutstanding = composite.lines.some((l) => l.source === 'open' && (l.outstanding ?? 0) > 0);
   const anyShipped = composite.lines.some((l) => (l.shipped ?? 0) > 0 && l.source === 'shipped');
   let orderStatus: OrderOverallStatus;
   if (input.shopify?.cancelled === true) orderStatus = 'canceled';
   else if (!composite.found && input.shopify === null) orderStatus = 'not_found';
+  // A dropped paid line trumps a "shipped" NAV picture: the customer is under-fulfilled.
+  else if (hasDroppedLine) orderStatus = 'line_dropped';
   else if (anyOutstanding && anyShipped) orderStatus = 'partial';
   else if (anyOutstanding) orderStatus = 'in_progress';
   else if (anyShipped) orderStatus = 'shipped';
@@ -161,7 +196,19 @@ export function assembleDossier(input: DossierInputs): OrderDossier {
   // The verdict. A shipped or cancelled order short-circuits (it is done, nothing to
   // chase). Otherwise the SAME classifyHandoff the board uses explains an open order.
   let handoff: OrderDossier['handoff'];
-  if (orderStatus === 'shipped') {
+  if (hasDroppedLine) {
+    // Highest priority: a paid Shopify line never reached NAV. Red, ours, and named
+    // so it stops hiding behind a "Shipped" NAV picture.
+    const n = droppedLines.length;
+    const skus = droppedLines.map((d) => d.sku).filter((s): s is string => s !== null);
+    handoff = {
+      state: 'line_dropped',
+      owner: 'grundens_ops',
+      reason: `${n} line${n === 1 ? '' : 's'} on the Shopify order never reached NAV (dropped at allocation${skus.length > 0 ? `: ${skus.join(', ')}` : ''}). The customer is under-fulfilled; check the warehouse availability below, the line may be shippable from TAC.`,
+      label: ORDER_HANDOFF_LABEL.line_dropped,
+      verdict: 'red',
+    };
+  } else if (orderStatus === 'shipped') {
     handoff = { state: 'shipped', owner: 'none', reason: 'Every line has shipped from NAV.', label: ORDER_HANDOFF_LABEL.shipped, verdict: 'green' };
   } else if (orderStatus === 'canceled') {
     handoff = { state: 'canceled', owner: 'none', reason: 'Order was cancelled in Shopify.', label: ORDER_HANDOFF_LABEL.canceled, verdict: 'green' };
@@ -320,20 +367,10 @@ export async function buildOrderDossier(nav: NavClient, orderNo: string): Promis
     delete sources[`nav_allocator:${l}`];
   }
 
-  // Availability for the outstanding open SKUs.
-  const skus = [...new Set(composite.lines.filter((l) => l.source === 'open' && (l.outstanding ?? 0) > 0).map((l) => l.sku).filter((s): s is string => s !== null))];
-  const availability: NavIabcRow[] = [];
-  if (skus.length > 0) {
-    const perSku = await Promise.all(skus.map((sku) => guarded(`nav_iabc:${sku}`, nav.getIabcBySku(sku), [] as NavIabcRow[], sources)));
-    for (const rows of perSku) availability.push(...rows);
-    sources.nav_availability = skus.every((s) => sources[`nav_iabc:${s}`] === 'ok') ? 'ok' : 'degraded';
-    for (const s of skus) delete sources[`nav_iabc:${s}`];
-  } else {
-    sources.nav_availability = 'not_found';
-  }
-
   // Shopify order via the middleware, keyed on the numeric Shopify order id from any
   // leg. Normalized to line items + money + cancel status (no customer block).
+  // Fetched BEFORE availability so a dropped Shopify line (a SKU on no NAV leg) can be
+  // included in the inventory fan-out and the operator can see where it is shippable.
   let shopify: OrderDossierShopify | null = null;
   const shopifyId = composite.legs.map((l) => l.webId).find((w) => w !== null && /^\d+$/.test(w)) ?? null;
   if (shopifyId !== null) {
@@ -342,6 +379,33 @@ export async function buildOrderDossier(nav: NavClient, orderNo: string): Promis
     if (r.status === 'ok') shopify = buildOrderInfo(r.data);
   } else {
     sources.shopify_order = 'not_found';
+  }
+
+  // Availability for the outstanding open SKUs PLUS any dropped Shopify SKUs (a paid
+  // line on no NAV leg). The dropped SKU's inventory is the whole point: it shows the
+  // operator the stock, often at TAC, that the line should have shipped from.
+  const navSkuSet = new Set(composite.lines.map((l) => l.sku).filter((s): s is string => s !== null));
+  const droppedSkus =
+    shopify === null || shopify.cancelled
+      ? []
+      : shopify.line_items.map((li) => li.sku).filter((s) => s.length > 0 && !navSkuSet.has(s));
+  const skus = [
+    ...new Set([
+      ...composite.lines
+        .filter((l) => l.source === 'open' && (l.outstanding ?? 0) > 0)
+        .map((l) => l.sku)
+        .filter((s): s is string => s !== null),
+      ...droppedSkus,
+    ]),
+  ];
+  const availability: NavIabcRow[] = [];
+  if (skus.length > 0) {
+    const perSku = await Promise.all(skus.map((sku) => guarded(`nav_iabc:${sku}`, nav.getIabcBySku(sku), [] as NavIabcRow[], sources)));
+    for (const rows of perSku) availability.push(...rows);
+    sources.nav_availability = skus.every((s) => sources[`nav_iabc:${s}`] === 'ok') ? 'ok' : 'degraded';
+    for (const s of skus) delete sources[`nav_iabc:${s}`];
+  } else {
+    sources.nav_availability = 'not_found';
   }
 
   return assembleDossier({ orderNo: base, nowMs, composite, edi, holds, trace, availability, shopify, sources });

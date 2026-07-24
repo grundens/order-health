@@ -139,8 +139,9 @@ export type OrderHandoffState =
   | 'blocked_code_defect'
   | 'backorder'
   | 'in_flight'
-  | 'shipped'    // fully posted / shipped: done, nothing to chase
-  | 'canceled';  // cancelled in Shopify / never fulfilled
+  | 'shipped'      // fully posted / shipped: done, nothing to chase
+  | 'canceled'     // cancelled in Shopify / never fulfilled
+  | 'line_dropped'; // a paid Shopify line never reached NAV (dropped, e.g. OOS at Holman)
 
 export interface OrderHandoffDetail {
   state: OrderHandoffState;
@@ -165,6 +166,7 @@ export const ORDER_HANDOFF_LABEL: Record<OrderHandoffState, string> = {
   in_flight: 'In flight',
   shipped: 'Shipped',
   canceled: 'Canceled',
+  line_dropped: 'Line dropped',
 };
 
 // --- Single-order dossier (ADR-0012) ---------------------------------------
@@ -197,6 +199,7 @@ export type OrderLineStatus =
   | 'outstanding'  // open, nothing shipped yet, stock exists
   | 'backorder'    // open, nothing shipped, no stock anywhere
   | 'canceled'
+  | 'dropped'      // on the Shopify order but on NO NAV leg: never reached NAV
   | 'unknown';
 
 export interface OrderDossierLine {
@@ -279,6 +282,7 @@ export type OrderOverallStatus =
   | 'partial'       // some lines shipped, some still open
   | 'in_progress'   // open, nothing shipped yet
   | 'canceled'
+  | 'line_dropped'  // a paid Shopify line never reached NAV (under-fulfilled)
   | 'not_found';    // no NAV order and no Shopify order
 
 export interface OrderDossier {
