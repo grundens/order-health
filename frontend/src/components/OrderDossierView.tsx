@@ -27,6 +27,7 @@ const ORDER_STATUS_LABEL: Record<OrderOverallStatus, string> = {
   partial: 'Partially shipped',
   in_progress: 'In progress',
   canceled: 'Canceled',
+  line_dropped: 'Line dropped',
   not_found: 'Not found',
 };
 
@@ -38,6 +39,7 @@ const LINE_STATUS_CLASS: Record<OrderLineStatus, string> = {
   outstanding: 'a',
   backorder: 'r',
   canceled: 'u',
+  dropped: 'r',
   unknown: 'u',
 };
 

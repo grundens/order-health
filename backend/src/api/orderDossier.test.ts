@@ -156,3 +156,49 @@ test('a not-found order returns not_found and a null handoff, never throws', () 
   assert.equal(d.order_status, 'not_found');
   assert.equal(d.handoff, null);
 });
+
+// The SP-322673 case: NAV shows every line shipped, but the Shopify order had one more
+// line that the middleware dropped at allocation and never sent to NAV. That must NOT
+// read "Shipped / Healthy": it is a red, ops-owned defect with the dropped line and its
+// inventory shown.
+test('a Shopify line absent from NAV is a dropped line: red, line_dropped, surfaced', () => {
+  const composite = assembleOrderComposite(
+    'SP-322673', [], [],
+    [{ orderNo: 'SP-322673-1', webId: '72', shippedAt: '2026-07-20T00:00:00Z' },
+     { orderNo: 'SP-322673-2', webId: '72', shippedAt: '2026-07-20T00:00:00Z' }],
+    [
+      { orderNo: 'SP-322673-1', lineNo: 10000, sku: '50432-425-0018', description: 'Riser Hoodie', location: 'TAC', shipped: 1, invoiced: 1, unitPrice: 90, postedAt: '2026-07-20T00:00:00Z' },
+      { orderNo: 'SP-322673-2', lineNo: 10000, sku: '50441-001-0018', description: 'Support Lobstermen SS T-Shirt', location: 'HF1FTZ', shipped: 1, invoiced: 1, unitPrice: 34, postedAt: '2026-07-20T00:00:00Z' },
+    ],
+  );
+  // The Shopify order carries a fourth line the NAV legs never got (the Mermaid Hoodie).
+  const shopify = {
+    line_items: [
+      { sku: '50432-425-0018', quantity: 1, name: 'Riser Hoodie', unit_price: '90' },
+      { sku: '50441-001-0018', quantity: 1, name: 'Support Lobstermen SS T-Shirt', unit_price: '34' },
+      { sku: '50218-001-0018', quantity: 1, name: 'Mermaid Hoodie', unit_price: '75' },
+    ],
+    order_total: '199', subtotal: '199', currency: 'USD',
+    financial_status: 'paid', fulfillment_status: 'partial', cancelled: false, cancelled_at: null,
+  };
+  // Its inventory is available at TAC (the point of surfacing it).
+  const availability = [
+    { sku: '50218-001-0018', location: 'TAC', channel: 'DTC', onHand: 14, available: 7, earliestShipDate: '2026-07-24' },
+  ];
+  const d = assembleDossier(inputs({ composite, shopify, availability }));
+
+  assert.equal(d.order_status, 'line_dropped');
+  assert.equal(d.handoff?.state, 'line_dropped');
+  assert.equal(d.handoff?.owner, 'grundens_ops');
+  assert.equal(d.handoff?.verdict, 'red');
+  const dropped = d.lines.find((l) => l.status === 'dropped');
+  assert.ok(dropped, 'the dropped Mermaid line must be present');
+  assert.equal(dropped?.sku, '50218-001-0018');
+  assert.equal(dropped?.leg, null);
+  assert.equal(dropped?.ordered, 1);
+  assert.equal(dropped?.outstanding, 1);
+  // The NAV lines still read as invoiced; the drop does not rewrite them.
+  assert.ok(d.lines.some((l) => l.sku === '50432-425-0018' && l.status === 'invoiced'));
+  // The dropped SKU's TAC availability is carried so the operator sees where it ships from.
+  assert.ok(d.availability.some((a) => a.sku === '50218-001-0018' && a.location === 'TAC' && a.available === 7));
+});
