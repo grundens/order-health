@@ -16,7 +16,7 @@
     "@fastify/static": "^7.0.4",
     "@order-health/shared": "*",
     "dotenv": "^16.4.5",
-    "fastify": "^4.28.1",
+    "fastify": "^5.10.0",
     "mssql": "^11.0.1",
     "node-cron": "^3.0.3",
     "pg": "^8.12.0"
